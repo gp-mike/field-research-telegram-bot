@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "field-research-telegram-bot"
+version = "0.1.0"
+description = "Telegram bot for collecting and structuring field research reports."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+research-bot = "research_bot.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/research_bot"]
+
+[tool.ruff]
+line-length = 100
