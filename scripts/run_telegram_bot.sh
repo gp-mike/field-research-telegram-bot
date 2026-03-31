@@ -84,6 +84,16 @@ DEFAULT_SUMMARY_PROMPT="$(cat <<'PROMPT'
 - Для полей decision_drivers, main_objections, main_risks, requested_features, questions_from_prospect, next_steps, summary_for_team:
   если явного упоминания нет, верни ["Нет данных"].
 - Для requested_features особенно: если респондент ничего не просил добавить/изменить, верни ["Нет данных"].
+- Не используй обобщения "по умолчанию" и типовые гипотезы. Только факты из входного текста.
+
+Критично для разделов:
+- decision_drivers (Что зашло) = только позитивные причины интереса или ценность, которую респондент увидел.
+  Примеры: "интересно", "удобно", "хочет попробовать", "зарегистрировали для примера", "понравилась скорость/простота".
+- main_objections = только явные возражения, барьеры, причины отказа или сомнений.
+  Примеры: "администрация не разрешит", "дорого", "не видит пользы", "сложно внедрить", "пока не готовы".
+- Не смешивай: позитив не должен попадать в main_objections, негатив не должен попадать в decision_drivers.
+- Если в одной фразе есть и плюс, и минус, раздели на два соответствующих пункта.
+- Не заменяй конкретику общими фразами. По возможности сохраняй формулировки близкими к словам респондента.
 PROMPT
 )"
 SUMMARY_PROMPT_FILE="${SUMMARY_PROMPT_FILE:-}"
@@ -847,15 +857,61 @@ field_intents = {
         r"\?",
     ],
     "main_objections": [
-        r"\b(возраж|отказ|не готов|неинтерес|дорого|сложн|не нужно|неудобно|не подходит|не хотят?)\b",
+        r"(возраж\w*|отказ\w*|не готов\w*|неинтерес\w*|дорог\w*|сложн\w*|не нужно|неудоб\w*|не подходит|не хотят?|не разреш\w*|администрац\w*|не получится|пока рано)",
     ],
     "main_risks": [
-        r"\b(риск|опасен|опасение|сомнен|проблем|тревог|боязн|страх)\b",
+        r"(риск\w*|опас\w*|сомнен\w*|проблем\w*|тревог\w*|боязн\w*|страх\w*)",
     ],
     "next_steps": [
         r"\b(следующ|дальше|созвон|контакт|написать|вернуться|договорил|план|сделать)\b",
     ],
 }
+
+positive_markers = [
+    r"(интерес\w*|понрав\w*|зашл\w*|удобн\w*|полезн\w*|быстр\w*|прост\w*|хотят? попробовать|готов(ы|а)? попробовать|зарегистрир\w*|подключ\w*)",
+]
+negative_markers = [
+    r"(возраж\w*|отказ\w*|не готов\w*|неинтерес\w*|дорог\w*|сложн\w*|не нужно|неудоб\w*|не подходит|не хотят?|не разреш\w*|администрац\w*|не получится|пока рано|сомнен\w*|риск\w*|опас\w*|проблем\w*)",
+]
+
+def classify_item(item: str) -> str:
+    txt = re.sub(r"\s+", " ", (item or "").strip().lower())
+    if any(re.search(p, txt) for p in negative_markers):
+        return "negative"
+    if any(re.search(p, txt) for p in positive_markers):
+        return "positive"
+    return "neutral"
+
+def unique_non_fallback(items):
+    out = []
+    seen = set()
+    for raw in items:
+        if not isinstance(raw, str):
+            continue
+        value = raw.strip()
+        if not value:
+            continue
+        low = value.lower()
+        if low in fallback_values:
+            continue
+        if low in seen:
+            continue
+        seen.add(low)
+        out.append(value)
+    return out
+
+def extract_from_source(patterns, max_items=3):
+    if not patterns:
+        return []
+    chunks = re.split(r"[\n\.\!\?;]|\bно\b|\bоднако\b|\bзато\b", source)
+    extracted = []
+    for chunk in chunks:
+        candidate = re.sub(r"^[\s,;:\-]+|[\s,;:\-]+$", "", chunk or "")
+        if len(candidate) < 4:
+            continue
+        if any(re.search(p, candidate) for p in patterns):
+            extracted.append(candidate)
+    return unique_non_fallback(extracted)[:max_items]
 
 def has_intent(field: str) -> bool:
     patterns = field_intents.get(field, [])
@@ -894,6 +950,51 @@ for field in list_fields:
     if not cleaned:
         cleaned = ["Нет данных"]
     payload[field] = cleaned
+
+# Post-fix: keep positive signals in decision_drivers and blockers in main_objections.
+drivers_raw = payload.get("decision_drivers")
+objections_raw = payload.get("main_objections")
+drivers_raw = drivers_raw if isinstance(drivers_raw, list) else []
+objections_raw = objections_raw if isinstance(objections_raw, list) else []
+
+drivers_fixed = []
+objections_fixed = []
+
+for item in drivers_raw:
+    if not isinstance(item, str):
+        continue
+    cls = classify_item(item)
+    if cls == "negative":
+        objections_fixed.append(item)
+    else:
+        drivers_fixed.append(item)
+
+for item in objections_raw:
+    if not isinstance(item, str):
+        continue
+    cls = classify_item(item)
+    if cls == "positive":
+        drivers_fixed.append(item)
+    else:
+        objections_fixed.append(item)
+
+drivers_final = unique_non_fallback(drivers_fixed)[:5]
+objections_final = unique_non_fallback(objections_fixed)[:5]
+
+if not drivers_final:
+    drivers_final = extract_from_source(positive_markers, 3)
+if not objections_final:
+    objections_final = extract_from_source(negative_markers, 3)
+
+payload["decision_drivers"] = drivers_final if drivers_final else ["Нет данных"]
+payload["main_objections"] = objections_final if objections_final else ["Нет данных"]
+
+risks_raw = payload.get("main_risks")
+risks_raw = risks_raw if isinstance(risks_raw, list) else []
+risks_final = unique_non_fallback(risks_raw)[:5]
+if not risks_final:
+    risks_final = extract_from_source(field_intents.get("main_risks", []), 3)
+payload["main_risks"] = risks_final if risks_final else ["Нет данных"]
 
 score = payload.get("interest_score_1_5", 0)
 try:
@@ -1157,30 +1258,26 @@ handle_start() {
 
 Сценарий:
 1) Отправьте название заведения и имя/роль контакта
-2) Пришлите голосовое и/или фото
+2) Пришлите голосовое с итогом визита и фото (если есть)
 3) Отправьте /done, когда отчет завершен
 4) Подтвердите итог: /yes (сохранить) или /no (исправить)
 
-Коротко, что сказать в голосовом:
-- кто был на встрече и какая роль
-- был ли интерес и подключение (да/нет/позже)
-- ключевые возражения/риски
-- какие функции или условия попросили
-- какие следующие шаги
-
 Команды: /done, /yes, /no, /cancel, /help"
+  send_message "${chat_id}" "Шаг 1: пришлите название заведения и имя/роль контакта одним сообщением."
 }
 
 handle_help() {
   local chat_id="$1"
   send_message "${chat_id}" "Пришлите материалы в любом порядке: текст, фото, голосовые. Затем /done.
 
-Чтобы отчет был точным, в голосовом закройте 5 пунктов:
+Чтобы отчет был точным, в голосовом закройте пункты:
 1) Контакт и роль
-2) Интерес/результат (подключили или нет)
-3) Возражения и риски
-4) Запрошенные функции/условия
-5) Следующие шаги
+2) Что понравилось в продукте
+3) Результат (подключили/не подключили/позже)
+4) Возражения и риски (если нет — скажите \"нет\")
+5) Запрошенные функции/условия (если нет — скажите \"нет\")
+6) Вопросы от собеседника (если нет — скажите \"нет\")
+7) Следующие шаги
 
 После этого бот соберет черновик и попросит подтверждение: /yes или /no."
 }
@@ -1272,7 +1369,10 @@ process_update() {
     had_title="$(jq -r 'if .title == null or .title == "" then "0" else "1" end' "${draft_file}")"
     set_draft_title_or_note "${draft_file}" "${text}"
     if [[ "${had_title}" == "0" ]]; then
-      send_message "${chat_id}" "Название отчета сохранено."
+      send_message "${chat_id}" "Название/контакт сохранены.
+
+Теперь отправьте голосовое (и фото, если есть), затем /done.
+В голосовом кратко отразите: что понравилось, результат, возражения, запрошенные функции, вопросы от собеседника и следующие шаги."
     else
       send_message "${chat_id}" "Текстовая заметка добавлена в черновик."
     fi
@@ -1282,14 +1382,14 @@ process_update() {
   if [[ -n "${photo_id}" ]]; then
     ensure_draft "${draft_file}" "${chat_id}" "${user_id}" "${username}"
     append_photo_to_draft "${draft_file}" "${photo_id}" "${caption}"
-    send_message "${chat_id}" "Фото добавлено в черновик."
+    send_message "${chat_id}" "Фото добавлено в черновик.Если нужно, пришлите еще голосовые/фото и отправьте /done."
     return
   fi
 
   if [[ -n "${voice_id}" ]]; then
     ensure_draft "${draft_file}" "${chat_id}" "${user_id}" "${username}"
     append_voice_to_draft "${draft_file}" "${voice_id}"
-    send_message "${chat_id}" "Голосовое добавлено. Отправьте /done, когда закончите."
+    send_message "${chat_id}" "Голосовое добавлено. Если нужно, пришлите еще голосовые/фото и отправьте /done."
     return
   fi
 }
