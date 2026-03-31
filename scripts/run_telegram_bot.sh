@@ -715,21 +715,64 @@ sync_report_to_google_sheet() {
   local report_json_path="$1"
   [[ -n "${GOOGLE_SHEETS_WEBHOOK_URL}" ]] || return 0
 
-  local payload response status body ok msg preview
-  payload="$(jq -c --arg token "${GOOGLE_SHEETS_WEBHOOK_TOKEN}" \
-    '{token: ($token | if . == "" then null else . end), report: .}' \
-    "${report_json_path}" 2>/dev/null || true)"
-  if [[ -z "${payload}" ]]; then
+  local payload_file response status body ok msg preview
+  payload_file="$(mktemp "${DATA_DIR}/sheet_payload.XXXXXX.json")"
+  if ! python3 - "${report_json_path}" "${GOOGLE_SHEETS_WEBHOOK_TOKEN}" > "${payload_file}" <<'PY'
+import base64
+import json
+import mimetypes
+import os
+import sys
+
+report_path = sys.argv[1]
+webhook_token = sys.argv[2]
+
+payload = json.loads(open(report_path, encoding="utf-8").read())
+attachments = payload.get("attachments", [])
+if isinstance(attachments, list):
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        if item.get("attachment_type") != "photo":
+            continue
+
+        path = item.get("stored_path") or ""
+        if not path or not os.path.isfile(path):
+            continue
+
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            item["content_base64"] = base64.b64encode(raw).decode("ascii")
+            item["mime_type"] = mimetypes.guess_type(path)[0] or "image/jpeg"
+            item["filename"] = os.path.basename(path) or "photo.jpg"
+        except Exception as exc:
+            item["upload_prepare_error"] = str(exc)
+
+out = {
+    "token": webhook_token if webhook_token else None,
+    "report": payload,
+}
+print(json.dumps(out, ensure_ascii=False))
+PY
+  then
+    rm -f "${payload_file}"
     echo "Sheet sync error: failed to build payload from ${report_json_path}"
+    return 1
+  fi
+  if [[ ! -s "${payload_file}" ]]; then
+    rm -f "${payload_file}"
+    echo "Sheet sync error: empty payload from ${report_json_path}"
     return 1
   fi
 
   response="$(curl -sS --max-time 45 --connect-timeout 10 \
     --retry 1 --retry-delay 1 --retry-all-errors \
     -H "Content-Type: application/json" \
-    -d "${payload}" \
+    --data-binary "@${payload_file}" \
     -w $'\nHTTP_STATUS:%{http_code}' \
     "${GOOGLE_SHEETS_WEBHOOK_URL}" 2>/dev/null || true)"
+  rm -f "${payload_file}"
 
   status="$(echo "${response}" | awk -F: '/^HTTP_STATUS:/{print $2}' | tail -n 1)"
   body="$(echo "${response}" | sed '/^HTTP_STATUS:/d')"

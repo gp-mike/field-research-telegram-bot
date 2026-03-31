@@ -66,7 +66,8 @@ Google Sheets (опционально, синхронизация после `/y
 1. Создайте проект Apps Script и вставьте код из `scripts/google_sheet_webhook.gs`.
 2. В скрипте задайте:
    - `SPREADSHEET_ID` (ID вашей таблицы),
-   - `WEBHOOK_TOKEN` (любой секрет, можно оставить пустым).
+   - `WEBHOOK_TOKEN` (любой секрет, можно оставить пустым),
+   - `DRIVE_FOLDER_ID` (опционально: папка Google Drive для фото).
 3. Deploy -> Web app:
    - Execute as: `Me`
    - Who has access: `Anyone`
@@ -77,7 +78,8 @@ Google Sheets (опционально, синхронизация после `/y
 
 После подтверждения `/yes` бот:
 - сохранит отчет в SQLite и файлы;
-- отправит копию отчета в Google Sheet.
+- отправит копию отчета в Google Sheet;
+- загрузит фото в Google Drive и запишет ссылки в таблицу.
 
 ## Команды бота
 
