@@ -131,29 +131,44 @@ POLL_DEBUG="${POLL_DEBUG:-0}"
 LAST_SENT_FILE="${RUNTIME_PREFIX}.last_sent"
 
 init_schema() {
-  sqlite3 "${DATABASE_PATH}" <<'SQL'
-PRAGMA foreign_keys = ON;
-CREATE TABLE IF NOT EXISTS reports (
-    report_id TEXT PRIMARY KEY,
-    chat_id INTEGER NOT NULL,
-    user_id INTEGER NOT NULL,
-    username TEXT,
-    title TEXT,
-    notes TEXT,
-    transcript TEXT NOT NULL,
-    ai_summary TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS report_attachments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    report_id TEXT NOT NULL,
-    attachment_type TEXT NOT NULL,
-    telegram_file_id TEXT NOT NULL,
-    stored_path TEXT NOT NULL,
-    caption TEXT,
-    FOREIGN KEY(report_id) REFERENCES reports(report_id) ON DELETE CASCADE
-);
-SQL
+  python3 - "${DATABASE_PATH}" <<'PY'
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+con = sqlite3.connect(db_path)
+con.execute("PRAGMA foreign_keys = ON;")
+con.execute(
+    """
+    CREATE TABLE IF NOT EXISTS reports (
+        report_id TEXT PRIMARY KEY,
+        chat_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        username TEXT,
+        title TEXT,
+        notes TEXT,
+        transcript TEXT NOT NULL,
+        ai_summary TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """
+)
+con.execute(
+    """
+    CREATE TABLE IF NOT EXISTS report_attachments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        report_id TEXT NOT NULL,
+        attachment_type TEXT NOT NULL,
+        telegram_file_id TEXT NOT NULL,
+        stored_path TEXT NOT NULL,
+        caption TEXT,
+        FOREIGN KEY(report_id) REFERENCES reports(report_id) ON DELETE CASCADE
+    )
+    """
+)
+con.commit()
+con.close()
+PY
 }
 
 tg_call_json() {
